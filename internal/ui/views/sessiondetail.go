@@ -100,6 +100,142 @@ func (v *SessionDetailView) toggleNextBlock() {
 	v.expandedBlocks[closest] = !v.expandedBlocks[closest]
 }
 
+// indent prepends spaces to every line of a multi-line string.
+func indent(s string, n int) string {
+	pad := strings.Repeat(" ", n)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = pad + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderStyledText renders text with markdown code block styling.
+// Fenced code blocks (```) get a background color; inline `code` gets highlighted.
+func renderStyledText(text string, width int, textColor lipgloss.Color) string {
+	lines := strings.Split(text, "\n")
+	var result strings.Builder
+	inCodeBlock := false
+	codeLang := ""
+
+	codeBlockStyle := lipgloss.NewStyle().
+		Background(theme.BgCard).
+		Foreground(theme.Cyan)
+
+	codeLangStyle := lipgloss.NewStyle().
+		Foreground(theme.TextDim).
+		Background(theme.BgCard).
+		Italic(true)
+
+	inlineCodeStyle := lipgloss.NewStyle().
+		Background(theme.BgCard).
+		Foreground(theme.Cyan)
+
+	normalStyle := lipgloss.NewStyle().Foreground(textColor)
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Detect code fence
+		if strings.HasPrefix(trimmed, "```") {
+			if !inCodeBlock {
+				// Opening fence
+				inCodeBlock = true
+				codeLang = strings.TrimPrefix(trimmed, "```")
+				codeLang = strings.TrimSpace(codeLang)
+				// Render the language label line
+				label := "```"
+				if codeLang != "" {
+					label += " " + codeLang
+				}
+				padded := label + strings.Repeat(" ", max(0, width-len([]rune(label))))
+				result.WriteString(codeLangStyle.Render(padded))
+			} else {
+				// Closing fence
+				inCodeBlock = false
+				codeLang = ""
+				padded := "```" + strings.Repeat(" ", max(0, width-3))
+				result.WriteString(codeLangStyle.Render(padded))
+			}
+		} else if inCodeBlock {
+			// Inside code block — render with background
+			runes := []rune(line)
+			// Wrap long lines
+			for len(runes) > width {
+				chunk := string(runes[:width])
+				result.WriteString(codeBlockStyle.Render(chunk))
+				result.WriteString("\n")
+				runes = runes[width:]
+			}
+			padded := string(runes) + strings.Repeat(" ", max(0, width-len(runes)))
+			result.WriteString(codeBlockStyle.Render(padded))
+		} else {
+			// Normal text — handle inline code and wrap
+			rendered := renderInlineCode(line, normalStyle, inlineCodeStyle)
+			// Simple wrap for normal text
+			runes := []rune(line)
+			if len(runes) > width {
+				// For lines with inline code, just do raw wrap
+				for len(runes) > width {
+					result.WriteString(normalStyle.Render(string(runes[:width])))
+					result.WriteString("\n")
+					runes = runes[width:]
+				}
+				result.WriteString(normalStyle.Render(string(runes)))
+			} else {
+				result.WriteString(rendered)
+			}
+		}
+		if i < len(lines)-1 {
+			result.WriteString("\n")
+		}
+	}
+	return result.String()
+}
+
+// renderInlineCode handles `code` spans within a line.
+func renderInlineCode(line string, normalStyle, codeStyle lipgloss.Style) string {
+	if !strings.Contains(line, "`") {
+		return normalStyle.Render(line)
+	}
+
+	var result strings.Builder
+	runes := []rune(line)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '`' {
+			// Find closing backtick
+			end := -1
+			for j := i + 1; j < len(runes); j++ {
+				if runes[j] == '`' {
+					end = j
+					break
+				}
+			}
+			if end > 0 {
+				code := string(runes[i+1 : end])
+				result.WriteString(codeStyle.Render(code))
+				i = end + 1
+				continue
+			}
+		}
+		// Accumulate normal text until next backtick or end
+		start := i
+		for i < len(runes) && runes[i] != '`' {
+			i++
+		}
+		result.WriteString(normalStyle.Render(string(runes[start:i])))
+	}
+	return result.String()
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (v *SessionDetailView) renderContent() string {
 	var b strings.Builder
 	v.blockPositions = nil
@@ -123,12 +259,21 @@ func (v *SessionDetailView) renderContent() string {
 		metaParts = append(metaParts, v.session.GitBranch)
 	}
 
-	metaBox := lipgloss.NewStyle().
+	metaLine := lipgloss.NewStyle().
 		Foreground(theme.TextDim).
-		PaddingLeft(2).
-		Render("  " + strings.Join(metaParts, "  ·  "))
-	b.WriteString(metaBox + "\n\n")
+		Render(strings.Join(metaParts, "  ·  "))
+	b.WriteString(indent(metaLine, 3) + "\n\n")
 	lineCount += 2
+
+	// Shared box base style — MarginLeft ensures all lines are indented
+	boxBase := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Width(boxWidth).
+		Padding(0, 1).
+		MarginLeft(2)
+
+	userBoxStyle := boxBase.BorderForeground(theme.Blue)
+	assistantBoxStyle := boxBase.BorderForeground(theme.Green)
 
 	for _, msg := range v.messages {
 		switch msg.Type {
@@ -141,7 +286,7 @@ func (v *SessionDetailView) renderContent() string {
 			// Build inner content
 			var inner strings.Builder
 			if text != "" {
-				inner.WriteString(wrapText(text, innerWidth))
+				inner.WriteString(renderStyledText(text, innerWidth, theme.TextPri))
 			}
 
 			// Tool results from user messages
@@ -169,15 +314,10 @@ func (v *SessionDetailView) renderContent() string {
 			}
 
 			// Render user box
-			box := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(theme.Blue).
-				Width(boxWidth).
-				Padding(0, 1).
-				Render(
-					lipgloss.NewStyle().Foreground(theme.Blue).Bold(true).Render("User") + "\n" +
-						inner.String())
-			b.WriteString("  " + box + "\n\n")
+			box := userBoxStyle.Render(
+				lipgloss.NewStyle().Foreground(theme.Blue).Bold(true).Render("User") + "\n" +
+					inner.String())
+			b.WriteString(box + "\n\n")
 			lineCount += strings.Count(box, "\n") + 3
 
 		case model.MsgTypeAssistant:
@@ -196,7 +336,7 @@ func (v *SessionDetailView) renderContent() string {
 					if inner.Len() > 0 {
 						inner.WriteString("\n")
 					}
-					inner.WriteString(wrapText(block.Text, innerWidth))
+					inner.WriteString(renderStyledText(block.Text, innerWidth, theme.TextPri))
 
 				case model.BlockThinking:
 					blockIdx := v.blockCount
@@ -263,13 +403,8 @@ func (v *SessionDetailView) renderContent() string {
 			}
 
 			// Render assistant box
-			box := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(theme.Green).
-				Width(boxWidth).
-				Padding(0, 1).
-				Render(header + "\n" + inner.String())
-			b.WriteString("  " + box + "\n\n")
+			box := assistantBoxStyle.Render(header + "\n" + inner.String())
+			b.WriteString(box + "\n\n")
 			lineCount += strings.Count(box, "\n") + 3
 
 		case model.MsgTypeSystem:
@@ -281,23 +416,27 @@ func (v *SessionDetailView) renderContent() string {
 				} else {
 					durStr = fmt.Sprintf("%.1fs", secs)
 				}
-				sep := lipgloss.NewStyle().Foreground(theme.Border).Render(
-					"  " + safeRepeat("─", boxWidth/3) +
-						lipgloss.NewStyle().Foreground(theme.TextDim).Render(" "+durStr+" ") +
-						safeRepeat("─", boxWidth/3))
-				b.WriteString(sep + "\n\n")
+				dashW := (boxWidth - len([]rune(durStr)) - 4) / 2
+				if dashW < 2 {
+					dashW = 2
+				}
+				sep := lipgloss.NewStyle().Foreground(theme.Border).Render(safeRepeat("─", dashW)) +
+					lipgloss.NewStyle().Foreground(theme.TextDim).Render(" "+durStr+" ") +
+					lipgloss.NewStyle().Foreground(theme.Border).Render(safeRepeat("─", dashW))
+				b.WriteString(indent(sep, 3) + "\n\n")
 				lineCount += 2
 			} else if msg.Subtype == model.SubtypeAPIError {
 				errLine := lipgloss.NewStyle().Foreground(theme.Red).Bold(true).Render(
-					"  ✗ Error: " + msg.ErrorCode)
-				b.WriteString(errLine + "\n")
+					"✗ Error: " + msg.ErrorCode)
+				b.WriteString(indent(errLine, 3) + "\n")
 				lineCount++
 			}
 
 		case model.MsgTypeSummary:
 			if msg.SummaryText != "" {
-				b.WriteString(lipgloss.NewStyle().Foreground(theme.TextDim).Italic(true).Render(
-					"  ~ Summary: "+truncate(msg.SummaryText, 80)) + "\n")
+				line := lipgloss.NewStyle().Foreground(theme.TextDim).Italic(true).Render(
+					"~ Summary: " + truncate(msg.SummaryText, 80))
+				b.WriteString(indent(line, 3) + "\n")
 				lineCount++
 			}
 		}
